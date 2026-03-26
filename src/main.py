@@ -53,8 +53,8 @@ class CreateNetworkScreen(ModalScreen):
 class DockerTUI(App):
     """Uma Interface de Usuário de Terminal (TUI) para gerenciar o Docker."""
 
-    TITLE = "🐳 Docker TUI"
-    SUB_TITLE = "Um 'Docker Desktop' para o seu terminal"
+    TITLE = "🐳 PyDocker"
+    SUB_TITLE = "Um 'Docker Desktop' para o seu terminal - Criado por Vitor Corrêa"
 
     # --- Atalhos de Teclado (Key Bindings) ---
     BINDINGS = [
