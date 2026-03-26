@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import DataTable, Footer, Header, Log
+from textual.widgets.data_table import Column
 
 # --- Conexão Inicial com o Docker ---
 # Tenta conectar ao daemon do Docker. Se falhar, o programa não inicia.
@@ -33,6 +34,7 @@ class DockerTUI(App):
         Binding(key="x", action="remove_container", description="❌ Remover"),
         Binding(key="l", action="show_logs", description="📜 Logs"),
         Binding(key="q", action="quit", description="Quit"),
+        Binding(key="i", action="refresh_images", description="🔄 Atualizar imagens"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -40,6 +42,7 @@ class DockerTUI(App):
         yield Header()
         with Container(id="app-grid"):
             yield DataTable(id="containers")
+            yield DataTable(id="images")  # Nova tabela para as imagens
             yield Log(id="logs", highlight=True)
         yield Footer()
 
@@ -49,21 +52,34 @@ class DockerTUI(App):
         self.query_one("#logs").display = False
 
         # Configura as colunas da tabela de contêineres
-        table = self.query_one("#containers", DataTable)
-        table.cursor_type = "row"  # Destaca a linha inteira
-        table.add_columns("ID", "Nome", "Imagem", "Status")
-        
-        # Carrega os dados na tabela
+        containers_table = self.query_one("#containers", DataTable)
+        containers_table.add_column("ID")
+        containers_table.add_column("Nome")
+        containers_table.add_column("Imagem")
+        containers_table.add_column("Status")
+
+        # Carrega os dados na tabela de contêineres
         self.update_containers_table()
+
+        # Configura as colunas da tabela de imagens
+        images_table = self.query_one("#images", DataTable)
+        images_table.add_column("ID")
+        images_table.add_column("Nome")
+        images_table.add_column("Imagem")
+
+        # Carrega os dados na tabela de imagens
+        self.update_images_table()
+
+        # Inicia a atualização dos dados a cada 1s
+        self.update_data_timer = self.set_interval(self.update_data, 1000)
 
     def update_containers_table(self) -> None:
         """Busca os dados do Docker e atualiza a tabela de contêineres."""
-        self.sub_title = "Atualizando..."
         table = self.query_one("#containers", DataTable)
         
         # Salva a chave da linha selecionada para restaurar o cursor depois
         selected_row = table.cursor_row
-        if 0 <= selected_row < len(table.rows):
+        if selected_row is not None and 0 <= selected_row < len(table.rows):
             # table.rows é um dicionário, extraímos a chave (RowKey) pela posição
             selected_key = list(table.rows.keys())[selected_row]
         else:
@@ -82,7 +98,7 @@ class DockerTUI(App):
                 else:
                     status_styled = f"[b yellow]{status}[/]"
 
-                image_tag = container.image.tags[0] if container.image.tags else "N/A"
+                image_tag = container.image.tags[0] if container.image.tags and container.image.tags[0] is not None else "N/A"
                 
                 table.add_row(
                     container.short_id,
@@ -197,6 +213,30 @@ class DockerTUI(App):
             except APIError as e:
                 self.notify(f"Erro ao buscar logs: {e}", severity="error")
 
+    def update_images_table(self) -> None:
+        """Busca os dados do Docker e atualiza a tabela de imagens."""
+        table = self.query_one("#images", DataTable)
+
+        try:
+            for image in docker_client.images.list(all=True):
+                table.add_row(
+                    image.short_id,
+                    image.tags[0] if image.tags else "N/A",
+                    image.attrs["RepoTags"][0] if image.attrs["RepoTags"] else "N/A",
+                    key=image.id,  # Chave única para identificar a linha
+                )
+        except APIError as e:
+            self.notify(f"Erro de API do Docker: {e}", severity="error")
+
+    def action_refresh_images(self) -> None:
+        """Ação para o atalho 'r', atualiza a tabela de imagens."""
+        self.notify("🔄 Atualizando lista de imagens...")
+        self.update_images_table()
+
+    def update_data(self) -> None:
+        """Atualiza os dados do Docker."""
+        self.update_containers_table()
+        self.update_images_table()
 
 if __name__ == "__main__":
     app = DockerTUI()
