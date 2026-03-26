@@ -5,7 +5,7 @@ from docker.errors import APIError, DockerException
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
-from textual.widgets import DataTable, Footer, Header, Log
+from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane
 from textual.widgets.data_table import Column
 
 # --- Conexão Inicial com o Docker ---
@@ -40,14 +40,19 @@ class DockerTUI(App):
     def compose(self) -> ComposeResult:
         """Cria e organiza os widgets da interface."""
         yield Header()
-        with Container(id="app-grid"):
-            yield DataTable(id="containers")
-            yield DataTable(id="images")  # Nova tabela para as imagens
-            yield Log(id="logs", highlight=True)
+        with TabbedContent():
+            with TabPane("Contêineres", id="containers_tab"):
+                yield DataTable(id="containers")
+            with TabPane("Imagens", id="images_tab"):
+                yield DataTable(id="images")
+            with TabPane("Volumes", id="volumes_tab"):
+                yield DataTable(id="volumes")
+            with TabPane("Logs", id="logs_tab"):
+                yield Log(id="logs", highlight=True)
         yield Footer()
 
     def on_mount(self) -> None:
-        """Chamado quando o app é montado. Configura a tabela e carrega os dados."""
+        """Chamado quando o app é montado. Configura as tabelas e carrega os dados."""
         # Esconde o painel de logs inicialmente
         self.query_one("#logs").display = False
 
@@ -57,6 +62,7 @@ class DockerTUI(App):
         containers_table.add_column("Nome")
         containers_table.add_column("Imagem")
         containers_table.add_column("Status")
+        containers_table.cursor_type = "row"
 
         # Carrega os dados na tabela de contêineres
         self.update_containers_table()
@@ -66,12 +72,22 @@ class DockerTUI(App):
         images_table.add_column("ID")
         images_table.add_column("Nome")
         images_table.add_column("Imagem")
+        images_table.cursor_type = "row"
 
         # Carrega os dados na tabela de imagens
         self.update_images_table()
 
+        # Configura as colunas da tabela de volumes
+        volumes_table = self.query_one("#volumes", DataTable)
+        volumes_table.add_column("Nome")
+        volumes_table.add_column("Driver")
+        volumes_table.cursor_type = "row"
+
+        # Carrega os dados na tabela de volumes
+        self.update_volumes_table()
+
         # Inicia a atualização dos dados a cada 1s
-        self.update_data_timer = self.set_interval(self.update_data, 1000)
+        self.update_data_timer = self.set_interval(1000, self.update_data)
 
     def update_containers_table(self) -> None:
         """Busca os dados do Docker e atualiza a tabela de contêineres."""
@@ -216,6 +232,7 @@ class DockerTUI(App):
     def update_images_table(self) -> None:
         """Busca os dados do Docker e atualiza a tabela de imagens."""
         table = self.query_one("#images", DataTable)
+        table.clear()
 
         try:
             for image in docker_client.images.list(all=True):
@@ -224,6 +241,21 @@ class DockerTUI(App):
                     image.tags[0] if image.tags else "N/A",
                     image.attrs["RepoTags"][0] if image.attrs["RepoTags"] else "N/A",
                     key=image.id,  # Chave única para identificar a linha
+                )
+        except APIError as e:
+            self.notify(f"Erro de API do Docker: {e}", severity="error")
+
+    def update_volumes_table(self) -> None:
+        """Busca os dados do Docker e atualiza a tabela de volumes."""
+        table = self.query_one("#volumes", DataTable)
+        table.clear()
+
+        try:
+            for volume in docker_client.volumes.list():
+                table.add_row(
+                    volume.name,
+                    volume.attrs.get("Driver", "N/A"),
+                    key=volume.id,  # Chave única para identificar a linha
                 )
         except APIError as e:
             self.notify(f"Erro de API do Docker: {e}", severity="error")
@@ -237,6 +269,7 @@ class DockerTUI(App):
         """Atualiza os dados do Docker."""
         self.update_containers_table()
         self.update_images_table()
+        self.update_volumes_table()
 
 if __name__ == "__main__":
     app = DockerTUI()
