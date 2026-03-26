@@ -7,32 +7,32 @@ from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane
 from textual.widgets.data_table import Column
-from textual.screen import ModalScreen
+from textual.screen import Screen, ModalScreen
 from textual.widgets import Input, Button, Label
 from textual.containers import Vertical, Horizontal
 
-# --- Conexão Inicial com o Docker ---
-# Tenta conectar ao daemon do Docker. Se falhar, o programa não inicia.
+# --- Docker initial connection ---
+# Attempts to connect to the Docker daemon; exits on failure.
 try:
     docker_client = docker.from_env()
-    # Um "ping" rápido para garantir que o daemon está respondendo.
+    # Quick ping to ensure the daemon is responsive.
     docker_client.ping()
 except DockerException:
-    print("❌ Erro: Não foi possível conectar ao Docker.")
-    print("   Verifique se o serviço (daemon) do Docker está em execução.")
+    print("❌ Error: Unable to connect to Docker.")
+    print("   Please check that the Docker daemon/service is running.")
     exit(1)
 
 
 class CreateNetworkScreen(ModalScreen):
-    """Tela modal para criar uma nova rede Docker."""
+    """Modal screen to create a new Docker network."""
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("Nome da nova rede:")
-            yield Input(placeholder="Digite o nome da rede", id="network_name")
+            yield Label("New network name:")
+            yield Input(placeholder="Type network name", id="network_name")
             with Horizontal():
-                yield Button("Criar", id="create_btn", variant="primary")
-                yield Button("Cancelar", id="cancel_btn")
+                yield Button("Create", id="create_btn", variant="primary")
+                yield Button("Cancel", id="cancel_btn")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "create_btn":
@@ -40,105 +40,125 @@ class CreateNetworkScreen(ModalScreen):
             if network_name:
                 try:
                     docker_client.networks.create(network_name, driver="bridge")
-                    self.app.notify(f"✅ Rede '{network_name}' criada com sucesso!", severity="information")
+                    self.app.notify(f"✅ Network '{network_name}' created successfully!", severity="information")
                     self.app.query_one("#networks", DataTable).clear()
                     self.app.update_networks_table()
                 except APIError as e:
-                    self.app.notify(f"Erro ao criar rede: {e}", severity="error")
+                    self.app.notify(f"Error creating network: {e}", severity="error")
             else:
-                self.app.notify("Nome da rede não pode estar vazio.", severity="warning")
+                self.app.notify("Network name cannot be empty.", severity="warning")
+        self.app.pop_screen()
+
+
+class LogsScreen(Screen):
+    """Screen for viewing container logs."""
+
+    BINDINGS = [
+        Binding(key="b", action="back", description="⬅️ Voltar"),
+        Binding(key="q", action="quit", description="Quit"),
+    ]
+
+    def __init__(self, logs: str):
+        super().__init__()
+        self.logs_content = logs
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Log(id="logs", highlight=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#logs", Log).write(self.logs_content)
+
+    def action_back(self) -> None:
+        """Voltar para a interface principal."""
         self.app.pop_screen()
 
 
 class DockerTUI(App):
-    """Uma Interface de Usuário de Terminal (TUI) para gerenciar o Docker."""
+    """A terminal UI for managing Docker resources."""
 
     TITLE = "🐳 PyDocker"
-    SUB_TITLE = "Um 'Docker Desktop' para o seu terminal - Criado por Vitor Corrêa"
+    SUB_TITLE = "A terminal Docker dashboard - Built by Vitor Corrêa (https://github.com/correavitor4)"
 
     # --- Atalhos de Teclado (Key Bindings) ---
     BINDINGS = [
-        Binding(key="r", action="refresh_tables", description="🔄 Atualizar"),
-        Binding(key="s", action="stop_container", description="🛑 Parar"),
-        Binding(key="d", action="start_container", description="▶️ Iniciar"),
-        Binding(key="x", action="remove_container", description="❌ Remover"),
+        Binding(key="r", action="refresh_tables", description="🔄 Refresh"),
+        Binding(key="s", action="stop_container", description="🛑 Stop"),
+        Binding(key="d", action="start_container", description="▶️ Start"),
+        Binding(key="x", action="remove_container", description="❌ Remove"),
         Binding(key="l", action="show_logs", description="📜 Logs"),
-        Binding(key="c", action="create_network", description="🌐 Criar rede"),
+        Binding(key="c", action="create_network", description="🌐 Create network"),
         Binding(key="q", action="quit", description="Quit"),
-        Binding(key="i", action="refresh_images", description="🔄 Atualizar imagens"),
+        Binding(key="i", action="refresh_images", description="🔄 Refresh images"),
     ]
 
     def compose(self) -> ComposeResult:
-        """Cria e organiza os widgets da interface."""
+        """Create and arrange UI widgets."""
         yield Header()
         with TabbedContent():
-            with TabPane("Contêineres", id="containers_tab"):
+            with TabPane("Containers", id="containers_tab"):
                 yield DataTable(id="containers")
-            with TabPane("Imagens", id="images_tab"):
+            with TabPane("Images", id="images_tab"):
                 yield DataTable(id="images")
             with TabPane("Volumes", id="volumes_tab"):
                 yield DataTable(id="volumes")
-            with TabPane("Redes", id="networks_tab"):
+            with TabPane("Networks", id="networks_tab"):
                 yield DataTable(id="networks")
-            with TabPane("Logs", id="logs_tab"):
-                yield Log(id="logs", highlight=True)
         yield Footer()
 
     def on_mount(self) -> None:
-        """Chamado quando o app é montado. Configura as tabelas e carrega os dados."""
-        # Esconde o painel de logs inicialmente
-        self.query_one("#logs").display = False
-
-        # Configura as colunas da tabela de contêineres
+        """Called when the app is mounted. Configure tables and load data."""
+        # Setup containers table columns
         containers_table = self.query_one("#containers", DataTable)
         containers_table.add_column("ID")
-        containers_table.add_column("Nome")
-        containers_table.add_column("Imagem")
+        containers_table.add_column("Name")
+        containers_table.add_column("Image")
         containers_table.add_column("Status")
         containers_table.cursor_type = "row"
 
-        # Carrega os dados na tabela de contêineres
+        # Load containers data
         self.update_containers_table()
 
-        # Configura as colunas da tabela de imagens
+        # Configure columns for images table
         images_table = self.query_one("#images", DataTable)
         images_table.add_column("ID")
-        images_table.add_column("Nome")
-        images_table.add_column("Imagem")
+        images_table.add_column("Name")
+        images_table.add_column("Image")
         images_table.cursor_type = "row"
 
-        # Carrega os dados na tabela de imagens
+        # Load images data
         self.update_images_table()
 
-        # Configura as colunas da tabela de volumes
+        # Configure columns for volumes table
         volumes_table = self.query_one("#volumes", DataTable)
-        volumes_table.add_column("Nome")
+        volumes_table.add_column("Name")
         volumes_table.add_column("Driver")
         volumes_table.cursor_type = "row"
 
-        # Carrega os dados na tabela de volumes
+        # Load volumes data
         self.update_volumes_table()
 
-        # Configura as colunas da tabela de redes
+        # Configure columns for networks table
         networks_table = self.query_one("#networks", DataTable)
-        networks_table.add_column("Nome")
+        networks_table.add_column("Name")
         networks_table.add_column("Driver")
         networks_table.cursor_type = "row"
 
-        # Carrega os dados na tabela de redes
+        # Load networks data
         self.update_networks_table()
 
         # Inicia a atualização dos dados a cada 1s
         self.update_data_timer = self.set_interval(1000, self.update_data)
 
     def update_containers_table(self) -> None:
-        """Busca os dados do Docker e atualiza a tabela de contêineres."""
+        """Fetch Docker container data and refresh the containers table."""
         table = self.query_one("#containers", DataTable)
         
-        # Salva a chave da linha selecionada para restaurar o cursor depois
+        # Keep the selected row key so we can restore focus after table refresh
         selected_row = table.cursor_row
         if selected_row is not None and 0 <= selected_row < len(table.rows):
-            # table.rows é um dicionário, extraímos a chave (RowKey) pela posição
+            # table.rows is a dict, so we fetch the RowKey by index
             selected_key = list(table.rows.keys())[selected_row]
         else:
             selected_key = None
@@ -173,106 +193,86 @@ class DockerTUI(App):
         except APIError as e:
             self.notify(f"Erro de API do Docker: {e}", severity="error", timeout=10)
         
-        self.sub_title = "Um 'Docker Desktop' para o seu terminal"
+        self.sub_title = "A terminal Docker dashboard - Built by Vitor Corrêa (https://github.com/correavitor4)"
 
     # --- Ações dos Atalhos ---
 
     def action_refresh_tables(self) -> None:
-        """Ação para o atalho 'r', atualiza a tabela."""
-        self.notify("🔄 Atualizando lista de contêineres...")
+        """Action for 'r' key binding: refresh all tables."""
+        self.notify("🔄 Refreshing container list...")
         self.update_containers_table()
 
     def _get_selected_container_id(self) -> str | None:
-        """Helper para obter o ID do contêiner selecionado na tabela."""
+        """Helper to get the selected container ID from the table."""
         table = self.query_one("#containers", DataTable)
         if not table.row_count or not (0 <= table.cursor_row < len(table.rows)):
-            self.notify("Nenhum contêiner na lista.", severity="warning")
+            self.notify("No containers available.", severity="warning")
             return None
         
-        # Obtém a RowKey da linha atual e retorna seu valor (o ID do contêiner)
+        # Get the current row's RowKey and return its value (container ID)
         row_key = list(table.rows.keys())[table.cursor_row]
         return row_key.value
 
     def action_stop_container(self) -> None:
-        """Ação para parar o contêiner selecionado."""
+        """Action to stop the selected container."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
                 if container.status == "running":
-                    self.notify(f"Parando contêiner {container.name}...")
+                    self.notify(f"Stopping container {container.name}...")
                     container.stop()
-                    self.notify(f"✅ Contêiner {container.name} parado.", severity="information")
+                    self.notify(f"✅ Container {container.name} stopped.", severity="information")
                 else:
-                    self.notify(f"⚠️ Contêiner {container.name} já está parado.", severity="warning")
+                    self.notify(f"⚠️ Container {container.name} is already stopped.", severity="warning")
                 self.update_containers_table()
             except APIError as e:
-                self.notify(f"Erro ao parar: {e}", severity="error")
+                self.notify(f"Error stopping container: {e}", severity="error")
 
     def action_start_container(self) -> None:
-        """Ação para iniciar o contêiner selecionado."""
+        """Action to start the selected container."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
                 if container.status != "running":
-                    self.notify(f"Iniciando contêiner {container.name}...")
+                    self.notify(f"Starting container {container.name}...")
                     container.start()
-                    self.notify(f"✅ Contêiner {container.name} iniciado.", severity="information")
+                    self.notify(f"✅ Container {container.name} started.", severity="information")
                 else:
-                    self.notify(f"⚠️ Contêiner {container.name} já está em execução.", severity="warning")
+                    self.notify(f"⚠️ Container {container.name} is already running.", severity="warning")
                 self.update_containers_table()
             except APIError as e:
-                self.notify(f"Erro ao iniciar: {e}", severity="error")
+                self.notify(f"Error starting container: {e}", severity="error")
 
     def action_remove_container(self) -> None:
-        """Ação para remover o contêiner selecionado."""
+        """Action to remove the selected container."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
                 if container.status != "running":
-                    self.notify(f"Removendo contêiner {container.name}...")
+                    self.notify(f"Removing container {container.name}...")
                     container.remove()
-                    self.notify(f"✅ Contêiner {container.name} removido.", severity="information")
+                    self.notify(f"✅ Container {container.name} removed.", severity="information")
                     self.update_containers_table()
                 else:
-                    self.notify("🛑 Pare o contêiner antes de remover.", severity="error")
+                    self.notify("🛑 Stop the container before removing.", severity="error")
             except APIError as e:
-                self.notify(f"Erro ao remover: {e}", severity="error")
+                self.notify(f"Error removing container: {e}", severity="error")
 
     def action_show_logs(self) -> None:
         """Ação para mostrar os logs do contêiner selecionado."""
-        log_panel = self.query_one("#logs", Log)
-        
-        # Se o painel de log estiver visível, esconde e volta para a tabela
-        if log_panel.display:
-            log_panel.clear()
-            log_panel.display = False
-            self.query_one("#containers").display = True
-            self.set_focus(self.query_one("#containers"))
-            self.sub_title = "Um 'Docker Desktop' para o seu terminal"
-            return
-
-        # Se não, busca os logs e mostra o painel
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
-                self.sub_title = f"📜 Logs de {container.name} (pressione 'l' para voltar)"
-                
-                # Mostra o painel de logs e esconde a tabela
-                self.query_one("#containers").display = False
-                log_panel.display = True
-                
-                # Limpa logs antigos e escreve os novos
-                log_panel.clear()
-                logs = container.logs(stream=False, tail=200).decode("utf-8")
-                log_panel.write(logs)
-                log_panel.scroll_end(animate=False)
-                self.set_focus(log_panel)
-
+                logs = container.logs(tail=100, stream=False, timestamps=True).decode('utf-8', errors='ignore')
+                logs_screen = LogsScreen(logs)
+                self.push_screen(logs_screen)
             except APIError as e:
                 self.notify(f"Erro ao buscar logs: {e}", severity="error")
+        else:
+            self.notify("Selecione um contêiner para ver os logs.", severity="warning")
 
     def update_images_table(self) -> None:
-        """Busca os dados do Docker e atualiza a tabela de imagens."""
+        """Fetch Docker image data and refresh images table."""
         table = self.query_one("#images", DataTable)
         table.clear()
 
@@ -288,7 +288,7 @@ class DockerTUI(App):
             self.notify(f"Erro de API do Docker: {e}", severity="error")
 
     def update_volumes_table(self) -> None:
-        """Busca os dados do Docker e atualiza a tabela de volumes."""
+        """Fetch Docker volume data and refresh volumes table."""
         table = self.query_one("#volumes", DataTable)
         table.clear()
 
@@ -303,7 +303,7 @@ class DockerTUI(App):
             self.notify(f"Erro de API do Docker: {e}", severity="error")
 
     def update_networks_table(self) -> None:
-        """Busca os dados do Docker e atualiza a tabela de redes."""
+        """Fetch Docker network data and refresh networks table."""
         table = self.query_one("#networks", DataTable)
         table.clear()
 
@@ -318,12 +318,12 @@ class DockerTUI(App):
             self.notify(f"Erro de API do Docker: {e}", severity="error")
 
     def action_refresh_images(self) -> None:
-        """Ação para o atalho 'r', atualiza a tabela de imagens."""
-        self.notify("🔄 Atualizando lista de imagens...")
+        """Action for 'i' key binding: refresh images table."""
+        self.notify("🔄 Refreshing image list...")
         self.update_images_table()
 
     def action_create_network(self) -> None:
-        """Ação para criar uma nova rede Docker."""
+        """Action to open network creation modal."""
         self.push_screen(CreateNetworkScreen())
 
     def update_data(self) -> None:
