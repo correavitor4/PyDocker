@@ -7,6 +7,9 @@ from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane
 from textual.widgets.data_table import Column
+from textual.screen import ModalScreen
+from textual.widgets import Input, Button, Label
+from textual.containers import Vertical, Horizontal
 
 # --- Conexão Inicial com o Docker ---
 # Tenta conectar ao daemon do Docker. Se falhar, o programa não inicia.
@@ -18,6 +21,33 @@ except DockerException:
     print("❌ Erro: Não foi possível conectar ao Docker.")
     print("   Verifique se o serviço (daemon) do Docker está em execução.")
     exit(1)
+
+
+class CreateNetworkScreen(ModalScreen):
+    """Tela modal para criar uma nova rede Docker."""
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Nome da nova rede:")
+            yield Input(placeholder="Digite o nome da rede", id="network_name")
+            with Horizontal():
+                yield Button("Criar", id="create_btn", variant="primary")
+                yield Button("Cancelar", id="cancel_btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "create_btn":
+            network_name = self.query_one("#network_name", Input).value.strip()
+            if network_name:
+                try:
+                    docker_client.networks.create(network_name, driver="bridge")
+                    self.app.notify(f"✅ Rede '{network_name}' criada com sucesso!", severity="information")
+                    self.app.query_one("#networks", DataTable).clear()
+                    self.app.update_networks_table()
+                except APIError as e:
+                    self.app.notify(f"Erro ao criar rede: {e}", severity="error")
+            else:
+                self.app.notify("Nome da rede não pode estar vazio.", severity="warning")
+        self.app.pop_screen()
 
 
 class DockerTUI(App):
@@ -33,6 +63,7 @@ class DockerTUI(App):
         Binding(key="d", action="start_container", description="▶️ Iniciar"),
         Binding(key="x", action="remove_container", description="❌ Remover"),
         Binding(key="l", action="show_logs", description="📜 Logs"),
+        Binding(key="c", action="create_network", description="🌐 Criar rede"),
         Binding(key="q", action="quit", description="Quit"),
         Binding(key="i", action="refresh_images", description="🔄 Atualizar imagens"),
     ]
@@ -47,6 +78,8 @@ class DockerTUI(App):
                 yield DataTable(id="images")
             with TabPane("Volumes", id="volumes_tab"):
                 yield DataTable(id="volumes")
+            with TabPane("Redes", id="networks_tab"):
+                yield DataTable(id="networks")
             with TabPane("Logs", id="logs_tab"):
                 yield Log(id="logs", highlight=True)
         yield Footer()
@@ -85,6 +118,15 @@ class DockerTUI(App):
 
         # Carrega os dados na tabela de volumes
         self.update_volumes_table()
+
+        # Configura as colunas da tabela de redes
+        networks_table = self.query_one("#networks", DataTable)
+        networks_table.add_column("Nome")
+        networks_table.add_column("Driver")
+        networks_table.cursor_type = "row"
+
+        # Carrega os dados na tabela de redes
+        self.update_networks_table()
 
         # Inicia a atualização dos dados a cada 1s
         self.update_data_timer = self.set_interval(1000, self.update_data)
@@ -260,16 +302,36 @@ class DockerTUI(App):
         except APIError as e:
             self.notify(f"Erro de API do Docker: {e}", severity="error")
 
+    def update_networks_table(self) -> None:
+        """Busca os dados do Docker e atualiza a tabela de redes."""
+        table = self.query_one("#networks", DataTable)
+        table.clear()
+
+        try:
+            for network in docker_client.networks.list():
+                table.add_row(
+                    network.name,
+                    network.attrs.get("Driver", "N/A"),
+                    key=network.id,  # Chave única para identificar a linha
+                )
+        except APIError as e:
+            self.notify(f"Erro de API do Docker: {e}", severity="error")
+
     def action_refresh_images(self) -> None:
         """Ação para o atalho 'r', atualiza a tabela de imagens."""
         self.notify("🔄 Atualizando lista de imagens...")
         self.update_images_table()
+
+    def action_create_network(self) -> None:
+        """Ação para criar uma nova rede Docker."""
+        self.push_screen(CreateNetworkScreen())
 
     def update_data(self) -> None:
         """Atualiza os dados do Docker."""
         self.update_containers_table()
         self.update_images_table()
         self.update_volumes_table()
+        self.update_networks_table()
 
 if __name__ == "__main__":
     app = DockerTUI()
