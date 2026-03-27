@@ -10,6 +10,7 @@ from textual.widgets.data_table import Column
 from textual.screen import Screen, ModalScreen
 from textual.widgets import Input, Button, Label
 from textual.containers import Vertical, Horizontal
+import time
 
 # --- Docker initial connection ---
 # Attempts to connect to the Docker daemon; exits on failure.
@@ -19,8 +20,25 @@ try:
     docker_client.ping()
 except DockerException:
     print("❌ Error: Unable to connect to Docker.")
-    print("   Please check that the Docker daemon/service is running.")
-    exit(1)
+    print("   Attempting to start Docker Desktop...")
+    import subprocess
+    try:
+        subprocess.Popen(["C:\\Program Files\\Docker\\Docker Desktop.exe"])
+        for _ in range(30):
+            time.sleep(1)
+            try:
+                docker_client = docker.from_env()
+                docker_client.ping()
+                print("✅ Docker started successfully!")
+                break
+            except DockerException:
+                pass
+        else:
+            print("   Docker did not start within 30 seconds. Please start Docker Desktop manually.")
+            exit(1)
+    except FileNotFoundError:
+        print("   Docker Desktop not found at default location. Please start Docker manually.")
+        exit(1)
 
 
 class CreateNetworkScreen(ModalScreen):
@@ -91,6 +109,8 @@ class DockerTUI(App):
         Binding(key="c", action="create_network", description="🌐 Create network"),
         Binding(key="q", action="quit", description="Quit"),
         Binding(key="i", action="refresh_images", description="🔄 Refresh images"),
+        Binding(key="v", action="refresh_volumes", description="🔄 Refresh volumes"),
+        Binding(key="n", action="refresh_networks", description="🔄 Refresh networks"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -115,6 +135,9 @@ class DockerTUI(App):
         containers_table.add_column("Name")
         containers_table.add_column("Image")
         containers_table.add_column("Status")
+        containers_table.add_column("Ports")
+        containers_table.add_column("Created")
+        containers_table.add_column("Size")
         containers_table.cursor_type = "row"
 
         # Load containers data
@@ -123,8 +146,10 @@ class DockerTUI(App):
         # Configure columns for images table
         images_table = self.query_one("#images", DataTable)
         images_table.add_column("ID")
-        images_table.add_column("Name")
-        images_table.add_column("Image")
+        images_table.add_column("Repository")
+        images_table.add_column("Tag")
+        images_table.add_column("Size")
+        images_table.add_column("Created")
         images_table.cursor_type = "row"
 
         # Load images data
@@ -134,6 +159,8 @@ class DockerTUI(App):
         volumes_table = self.query_one("#volumes", DataTable)
         volumes_table.add_column("Name")
         volumes_table.add_column("Driver")
+        volumes_table.add_column("Mountpoint")
+        volumes_table.add_column("Created")
         volumes_table.cursor_type = "row"
 
         # Load volumes data
@@ -143,6 +170,8 @@ class DockerTUI(App):
         networks_table = self.query_one("#networks", DataTable)
         networks_table.add_column("Name")
         networks_table.add_column("Driver")
+        networks_table.add_column("Scope")
+        networks_table.add_column("Subnet")
         networks_table.cursor_type = "row"
 
         # Load networks data
@@ -178,11 +207,33 @@ class DockerTUI(App):
 
                 image_tag = container.image.tags[0] if container.image.tags and container.image.tags[0] is not None else "N/A"
                 
+                ports = []
+                if container.ports:
+                    for port_list in container.ports.values():
+                        if port_list:
+                            for p in port_list:
+                                private = p.get('PrivatePort') or p.get('Port') or 'N/A'
+                                public = p.get('PublicPort') or p.get('HostPort') or 'N/A'
+                                protocol = p.get('Type') or p.get('Protocol') or 'tcp'
+                                if private != 'N/A' and public != 'N/A':
+                                    ports.append(f"{private}->{public}/{protocol}")
+                                elif private != 'N/A':
+                                    ports.append(f"{private}/{protocol}")
+                                elif public != 'N/A':
+                                    ports.append(f"{public}/{protocol}")
+                ports_str = ', '.join(ports) if ports else "N/A"
+                
+                created = container.attrs.get('Created', 'N/A')[:19]
+                size = f"{container.attrs.get('SizeRootFs', 0) // (1024**2)}MB"
+                
                 table.add_row(
                     container.short_id,
                     container.name,
                     image_tag,
                     status_styled,
+                    ports_str,
+                    created,
+                    size,
                     key=container.id, # Chave única para identificar a linha
                 )
             
@@ -278,10 +329,16 @@ class DockerTUI(App):
 
         try:
             for image in docker_client.images.list(all=True):
+                repo_tag = image.tags[0] if image.tags else "<none>:<none>"
+                repo, tag = repo_tag.split(':', 1) if ':' in repo_tag else (repo_tag, '<none>')
+                size = f"{image.attrs['Size'] // (1024**2)}MB"
+                created = image.attrs['Created'][:19]
                 table.add_row(
                     image.short_id,
-                    image.tags[0] if image.tags else "N/A",
-                    image.attrs["RepoTags"][0] if image.attrs["RepoTags"] else "N/A",
+                    repo,
+                    tag,
+                    size,
+                    created,
                     key=image.id,  # Chave única para identificar a linha
                 )
         except APIError as e:
@@ -294,9 +351,13 @@ class DockerTUI(App):
 
         try:
             for volume in docker_client.volumes.list():
+                mountpoint = volume.attrs.get('Mountpoint', 'N/A')
+                created = volume.attrs.get('CreatedAt', 'N/A')[:19]
                 table.add_row(
                     volume.name,
                     volume.attrs.get("Driver", "N/A"),
+                    mountpoint,
+                    created,
                     key=volume.id,  # Chave única para identificar a linha
                 )
         except APIError as e:
@@ -309,9 +370,16 @@ class DockerTUI(App):
 
         try:
             for network in docker_client.networks.list():
+                scope = network.attrs.get('Scope', 'N/A')
+                subnet = 'N/A'
+                if network.attrs.get('IPAM') and network.attrs['IPAM'].get('Config'):
+                    config = network.attrs['IPAM']['Config'][0]
+                    subnet = config.get('Subnet', 'N/A')
                 table.add_row(
                     network.name,
                     network.attrs.get("Driver", "N/A"),
+                    scope,
+                    subnet,
                     key=network.id,  # Chave única para identificar a linha
                 )
         except APIError as e:
@@ -321,6 +389,16 @@ class DockerTUI(App):
         """Action for 'i' key binding: refresh images table."""
         self.notify("🔄 Refreshing image list...")
         self.update_images_table()
+
+    def action_refresh_volumes(self) -> None:
+        """Action for 'v' key binding: refresh volumes table."""
+        self.notify("🔄 Refreshing volume list...")
+        self.update_volumes_table()
+
+    def action_refresh_networks(self) -> None:
+        """Action for 'n' key binding: refresh networks table."""
+        self.notify("🔄 Refreshing network list...")
+        self.update_networks_table()
 
     def action_create_network(self) -> None:
         """Action to open network creation modal."""
