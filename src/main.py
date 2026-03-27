@@ -1,416 +1,221 @@
-# main.py
-import docker
+import docker  # Continuamos usando a biblioteca docker-py, pois o Podman é compatível
 from docker.errors import APIError, DockerException
+import os
+import subprocess
+import time
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
-from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane
-from textual.widgets.data_table import Column
+from textual.containers import Container, Vertical, Horizontal
+from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane, Input, Button, Label
 from textual.screen import Screen, ModalScreen
-from textual.widgets import Input, Button, Label
-from textual.containers import Vertical, Horizontal
-import time
 
-# --- Docker initial connection ---
-# Attempts to connect to the Docker daemon; exits on failure.
-try:
-    docker_client = docker.from_env()
-    # Quick ping to ensure the daemon is responsive.
-    docker_client.ping()
-except DockerException:
-    print("❌ Error: Unable to connect to Docker.")
-    print("   Attempting to start Docker Desktop...")
-    import subprocess
+# --- Podman Connection Helper ---
+def get_podman_client():
+    """
+    Tenta conectar ao socket do Podman. 
+    No Linux (Rootless), o caminho comum é /run/user/{uid}/podman/podman.sock
+    """
     try:
-        subprocess.Popen(["C:\\Program Files\\Docker\\Docker Desktop.exe"])
-        for _ in range(30):
-            time.sleep(1)
-            try:
-                docker_client = docker.from_env()
-                docker_client.ping()
-                print("✅ Docker started successfully!")
-                break
-            except DockerException:
-                pass
+        # Se estiver no Windows, o Podman Machine costuma expor via npipe
+        # Se no Linux, tentamos detectar o socket do usuário
+        if os.name != 'nt':
+            uid = os.getuid()
+            path = f"unix:///run/user/{uid}/podman/podman.sock"
+            client = docker.DockerClient(base_url=path)
         else:
-            print("   Docker did not start within 30 seconds. Please start Docker Desktop manually.")
-            exit(1)
-    except FileNotFoundError:
-        print("   Docker Desktop not found at default location. Please start Docker manually.")
+            client = docker.from_env() # No Windows/Mac, o Podman Desktop configura as envs
+        
+        client.ping()
+        return client
+    except Exception:
+        return None
+
+podman_client = get_podman_client()
+
+if not podman_client:
+    print("❌ Erro: Não foi possível conectar ao Podman.")
+    print("   Certifique-se que o serviço do Podman está rodando:")
+    print("   'podman system service --time=0 &'")
+    # Opcional: Tentar iniciar o serviço automaticamente (Linux)
+    if os.name != 'nt':
+         subprocess.Popen(["podman", "system", "service", "--time=0"])
+         time.sleep(2)
+         podman_client = get_podman_client()
+    
+    if not podman_client:
         exit(1)
 
-
 class CreateNetworkScreen(ModalScreen):
-    """Modal screen to create a new Docker network."""
-
+    """Modal para criar rede no Podman."""
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("New network name:")
-            yield Input(placeholder="Type network name", id="network_name")
+            yield Label("Nome da nova rede Podman:")
+            yield Input(placeholder="Ex: minha-rede", id="network_name")
             with Horizontal():
-                yield Button("Create", id="create_btn", variant="primary")
-                yield Button("Cancel", id="cancel_btn")
+                yield Button("Criar", id="create_btn", variant="primary")
+                yield Button("Cancelar", id="cancel_btn")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "create_btn":
-            network_name = self.query_one("#network_name", Input).value.strip()
-            if network_name:
+            name = self.query_one("#network_name", Input).value.strip()
+            if name:
                 try:
-                    docker_client.networks.create(network_name, driver="bridge")
-                    self.app.notify(f"✅ Network '{network_name}' created successfully!", severity="information")
-                    self.app.query_one("#networks", DataTable).clear()
+                    podman_client.networks.create(name, driver="bridge")
+                    self.app.notify(f"✅ Rede '{name}' criada!")
                     self.app.update_networks_table()
                 except APIError as e:
-                    self.app.notify(f"Error creating network: {e}", severity="error")
-            else:
-                self.app.notify("Network name cannot be empty.", severity="warning")
+                    self.app.notify(f"Erro: {e}", severity="error")
         self.app.pop_screen()
 
-
 class LogsScreen(Screen):
-    """Screen for viewing container logs."""
-
-    BINDINGS = [
-        Binding(key="b", action="back", description="⬅️ Voltar"),
-        Binding(key="q", action="quit", description="Quit"),
-    ]
-
+    BINDINGS = [Binding("b", "back", "Voltar"), Binding("q", "quit", "Sair")]
     def __init__(self, logs: str):
         super().__init__()
         self.logs_content = logs
-
     def compose(self) -> ComposeResult:
         yield Header()
         yield Log(id="logs", highlight=True)
         yield Footer()
-
     def on_mount(self) -> None:
         self.query_one("#logs", Log).write(self.logs_content)
-
     def action_back(self) -> None:
-        """Voltar para a interface principal."""
         self.app.pop_screen()
 
+class PodmanTUI(App):
+    """Interface TUI para gerenciar Podman."""
+    TITLE = "🦭 PyPodman"
+    SUB_TITLE = "Dashboard para Podman (API Compatible)"
 
-class DockerTUI(App):
-    """A terminal UI for managing Docker resources."""
-
-    TITLE = "🐳 PyDocker"
-    SUB_TITLE = "A terminal Docker dashboard - Built by Vitor Corrêa (https://github.com/correavitor4)"
-
-    # --- Atalhos de Teclado (Key Bindings) ---
     BINDINGS = [
-        Binding(key="r", action="refresh_tables", description="🔄 Refresh"),
-        Binding(key="s", action="stop_container", description="🛑 Stop"),
-        Binding(key="d", action="start_container", description="▶️ Start"),
-        Binding(key="x", action="remove_container", description="❌ Remove"),
-        Binding(key="l", action="show_logs", description="📜 Logs"),
-        Binding(key="c", action="create_network", description="🌐 Create network"),
-        Binding(key="q", action="quit", description="Quit"),
-        Binding(key="i", action="refresh_images", description="🔄 Refresh images"),
-        Binding(key="v", action="refresh_volumes", description="🔄 Refresh volumes"),
-        Binding(key="n", action="refresh_networks", description="🔄 Refresh networks"),
+        Binding("r", "refresh_all", "🔄 Refresh Tudo"),
+        Binding("s", "stop_container", "🛑 Stop"),
+        Binding("d", "start_container", "▶️ Start"),
+        Binding("x", "remove_container", "❌ Remove"),
+        Binding("l", "show_logs", "📜 Logs"),
+        Binding("c", "create_network", "🌐 Nova Rede"),
+        Binding("q", "quit", "Sair"),
     ]
 
     def compose(self) -> ComposeResult:
-        """Create and arrange UI widgets."""
         yield Header()
         with TabbedContent():
             with TabPane("Containers", id="containers_tab"):
                 yield DataTable(id="containers")
-            with TabPane("Images", id="images_tab"):
+            with TabPane("Imagens", id="images_tab"):
                 yield DataTable(id="images")
             with TabPane("Volumes", id="volumes_tab"):
                 yield DataTable(id="volumes")
-            with TabPane("Networks", id="networks_tab"):
+            with TabPane("Redes", id="networks_tab"):
                 yield DataTable(id="networks")
         yield Footer()
 
     def on_mount(self) -> None:
-        """Called when the app is mounted. Configure tables and load data."""
-        # Setup containers table columns
-        containers_table = self.query_one("#containers", DataTable)
-        containers_table.add_column("ID")
-        containers_table.add_column("Name")
-        containers_table.add_column("Image")
-        containers_table.add_column("Status")
-        containers_table.add_column("Ports")
-        containers_table.add_column("Created")
-        containers_table.add_column("Size")
-        containers_table.cursor_type = "row"
+        # Setup de colunas (mesma lógica do Docker)
+        self.setup_tables()
+        self.update_all_data()
+        self.set_interval(3000, self.update_all_data) # 3s para poupar CPU com Podman
 
-        # Load containers data
+    def setup_tables(self):
+        c = self.query_one("#containers", DataTable)
+        c.add_columns("ID", "Nome", "Imagem", "Status", "Portas", "Criado")
+        c.cursor_type = "row"
+
+        i = self.query_one("#images", DataTable)
+        i.add_columns("ID", "Repo", "Tag", "Tamanho")
+        i.cursor_type = "row"
+
+        v = self.query_one("#volumes", DataTable)
+        v.add_columns("Nome", "Driver", "Mountpoint")
+
+        n = self.query_one("#networks", DataTable)
+        n.add_columns("Nome", "Driver", "Subnet")
+
+    def update_all_data(self) -> None:
         self.update_containers_table()
-
-        # Configure columns for images table
-        images_table = self.query_one("#images", DataTable)
-        images_table.add_column("ID")
-        images_table.add_column("Repository")
-        images_table.add_column("Tag")
-        images_table.add_column("Size")
-        images_table.add_column("Created")
-        images_table.cursor_type = "row"
-
-        # Load images data
         self.update_images_table()
-
-        # Configure columns for volumes table
-        volumes_table = self.query_one("#volumes", DataTable)
-        volumes_table.add_column("Name")
-        volumes_table.add_column("Driver")
-        volumes_table.add_column("Mountpoint")
-        volumes_table.add_column("Created")
-        volumes_table.cursor_type = "row"
-
-        # Load volumes data
         self.update_volumes_table()
-
-        # Configure columns for networks table
-        networks_table = self.query_one("#networks", DataTable)
-        networks_table.add_column("Name")
-        networks_table.add_column("Driver")
-        networks_table.add_column("Scope")
-        networks_table.add_column("Subnet")
-        networks_table.cursor_type = "row"
-
-        # Load networks data
         self.update_networks_table()
-
-        # Inicia a atualização dos dados a cada 1s
-        self.update_data_timer = self.set_interval(1000, self.update_data)
 
     def update_containers_table(self) -> None:
-        """Fetch Docker container data and refresh the containers table."""
         table = self.query_one("#containers", DataTable)
-        
-        # Keep the selected row key so we can restore focus after table refresh
-        selected_row = table.cursor_row
-        if selected_row is not None and 0 <= selected_row < len(table.rows):
-            # table.rows is a dict, so we fetch the RowKey by index
-            selected_key = list(table.rows.keys())[selected_row]
-        else:
-            selected_key = None
-
+        selected_key = list(table.rows.keys())[table.cursor_row] if table.cursor_row is not None and table.rows else None
         table.clear()
 
-        try:
-            for container in docker_client.containers.list(all=True):
-                status = container.status
-                # Adiciona cor ao status para melhor visualização
-                if status == "running":
-                    status_styled = f"[b green]{status}[/]"
-                elif status.startswith("exited"):
-                    status_styled = f"[b red]{status}[/]"
-                else:
-                    status_styled = f"[b yellow]{status}[/]"
-
-                image_tag = container.image.tags[0] if container.image.tags and container.image.tags[0] is not None else "N/A"
-                
-                ports = []
-                if container.ports:
-                    for port_list in container.ports.values():
-                        if port_list:
-                            for p in port_list:
-                                private = p.get('PrivatePort') or p.get('Port') or 'N/A'
-                                public = p.get('PublicPort') or p.get('HostPort') or 'N/A'
-                                protocol = p.get('Type') or p.get('Protocol') or 'tcp'
-                                if private != 'N/A' and public != 'N/A':
-                                    ports.append(f"{private}->{public}/{protocol}")
-                                elif private != 'N/A':
-                                    ports.append(f"{private}/{protocol}")
-                                elif public != 'N/A':
-                                    ports.append(f"{public}/{protocol}")
-                ports_str = ', '.join(ports) if ports else "N/A"
-                
-                created = container.attrs.get('Created', 'N/A')[:19]
-                size = f"{container.attrs.get('SizeRootFs', 0) // (1024**2)}MB"
-                
-                table.add_row(
-                    container.short_id,
-                    container.name,
-                    image_tag,
-                    status_styled,
-                    ports_str,
-                    created,
-                    size,
-                    key=container.id, # Chave única para identificar a linha
-                )
+        for container in podman_client.containers.list(all=True):
+            status = container.status
+            color = "green" if status == "running" else "red" if "exited" in status else "yellow"
             
-            # Restaura a posição do cursor se a linha ainda existir
-            if selected_key and selected_key in table.rows:
-                table.move_cursor(row=table.get_row_index(selected_key))
-
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error", timeout=10)
-        
-        self.sub_title = "A terminal Docker dashboard - Built by Vitor Corrêa (https://github.com/correavitor4)"
-
-    # --- Ações dos Atalhos ---
-
-    def action_refresh_tables(self) -> None:
-        """Action for 'r' key binding: refresh all tables."""
-        self.notify("🔄 Refreshing container list...")
-        self.update_containers_table()
-
-    def _get_selected_container_id(self) -> str | None:
-        """Helper to get the selected container ID from the table."""
-        table = self.query_one("#containers", DataTable)
-        if not table.row_count or not (0 <= table.cursor_row < len(table.rows)):
-            self.notify("No containers available.", severity="warning")
-            return None
-        
-        # Get the current row's RowKey and return its value (container ID)
-        row_key = list(table.rows.keys())[table.cursor_row]
-        return row_key.value
-
-    def action_stop_container(self) -> None:
-        """Action to stop the selected container."""
-        if container_id := self._get_selected_container_id():
-            try:
-                container = docker_client.containers.get(container_id)
-                if container.status == "running":
-                    self.notify(f"Stopping container {container.name}...")
-                    container.stop()
-                    self.notify(f"✅ Container {container.name} stopped.", severity="information")
-                else:
-                    self.notify(f"⚠️ Container {container.name} is already stopped.", severity="warning")
-                self.update_containers_table()
-            except APIError as e:
-                self.notify(f"Error stopping container: {e}", severity="error")
-
-    def action_start_container(self) -> None:
-        """Action to start the selected container."""
-        if container_id := self._get_selected_container_id():
-            try:
-                container = docker_client.containers.get(container_id)
-                if container.status != "running":
-                    self.notify(f"Starting container {container.name}...")
-                    container.start()
-                    self.notify(f"✅ Container {container.name} started.", severity="information")
-                else:
-                    self.notify(f"⚠️ Container {container.name} is already running.", severity="warning")
-                self.update_containers_table()
-            except APIError as e:
-                self.notify(f"Error starting container: {e}", severity="error")
-
-    def action_remove_container(self) -> None:
-        """Action to remove the selected container."""
-        if container_id := self._get_selected_container_id():
-            try:
-                container = docker_client.containers.get(container_id)
-                if container.status != "running":
-                    self.notify(f"Removing container {container.name}...")
-                    container.remove()
-                    self.notify(f"✅ Container {container.name} removed.", severity="information")
-                    self.update_containers_table()
-                else:
-                    self.notify("🛑 Stop the container before removing.", severity="error")
-            except APIError as e:
-                self.notify(f"Error removing container: {e}", severity="error")
-
-    def action_show_logs(self) -> None:
-        """Ação para mostrar os logs do contêiner selecionado."""
-        if container_id := self._get_selected_container_id():
-            try:
-                container = docker_client.containers.get(container_id)
-                logs = container.logs(tail=100, stream=False, timestamps=True).decode('utf-8', errors='ignore')
-                logs_screen = LogsScreen(logs)
-                self.push_screen(logs_screen)
-            except APIError as e:
-                self.notify(f"Erro ao buscar logs: {e}", severity="error")
-        else:
-            self.notify("Selecione um contêiner para ver os logs.", severity="warning")
+            image = container.image.tags[0] if container.image.tags else container.image.short_id
+            created = container.attrs.get('Created', '')[:16].replace('T', ' ')
+            
+            table.add_row(
+                container.short_id,
+                container.name,
+                image,
+                f"[b {color}]{status}[/]",
+                str(container.attrs.get('NetworkSettings', {}).get('Ports', {})),
+                created,
+                key=container.id
+            )
+        if selected_key in table.rows:
+            table.move_cursor(row=table.get_row_index(selected_key))
 
     def update_images_table(self) -> None:
-        """Fetch Docker image data and refresh images table."""
         table = self.query_one("#images", DataTable)
         table.clear()
-
-        try:
-            for image in docker_client.images.list(all=True):
-                repo_tag = image.tags[0] if image.tags else "<none>:<none>"
-                repo, tag = repo_tag.split(':', 1) if ':' in repo_tag else (repo_tag, '<none>')
-                size = f"{image.attrs['Size'] // (1024**2)}MB"
-                created = image.attrs['Created'][:19]
-                table.add_row(
-                    image.short_id,
-                    repo,
-                    tag,
-                    size,
-                    created,
-                    key=image.id,  # Chave única para identificar a linha
-                )
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error")
+        for img in podman_client.images.list():
+            tag = img.tags[0] if img.tags else "<none>"
+            repo, t = tag.split(':') if ':' in tag else (tag, "")
+            size = f"{img.attrs['Size'] // (1024**2)}MB"
+            table.add_row(img.short_id, repo, t, size, key=img.id)
 
     def update_volumes_table(self) -> None:
-        """Fetch Docker volume data and refresh volumes table."""
         table = self.query_one("#volumes", DataTable)
         table.clear()
-
-        try:
-            for volume in docker_client.volumes.list():
-                mountpoint = volume.attrs.get('Mountpoint', 'N/A')
-                created = volume.attrs.get('CreatedAt', 'N/A')[:19]
-                table.add_row(
-                    volume.name,
-                    volume.attrs.get("Driver", "N/A"),
-                    mountpoint,
-                    created,
-                    key=volume.id,  # Chave única para identificar a linha
-                )
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error")
+        for vol in podman_client.volumes.list():
+            table.add_row(vol.name, vol.attrs.get('Driver', '-'), vol.attrs.get('Mountpoint', '-'))
 
     def update_networks_table(self) -> None:
-        """Fetch Docker network data and refresh networks table."""
         table = self.query_one("#networks", DataTable)
         table.clear()
+        for net in podman_client.networks.list():
+            subnet = "N/A"
+            if 'IPAM' in net.attrs and net.attrs['IPAM'].get('Config'):
+                subnet = net.attrs['IPAM']['Config'][0].get('Subnet', 'N/A')
+            table.add_row(net.name, net.attrs.get('Driver', '-'), subnet)
 
-        try:
-            for network in docker_client.networks.list():
-                scope = network.attrs.get('Scope', 'N/A')
-                subnet = 'N/A'
-                if network.attrs.get('IPAM') and network.attrs['IPAM'].get('Config'):
-                    config = network.attrs['IPAM']['Config'][0]
-                    subnet = config.get('Subnet', 'N/A')
-                table.add_row(
-                    network.name,
-                    network.attrs.get("Driver", "N/A"),
-                    scope,
-                    subnet,
-                    key=network.id,  # Chave única para identificar a linha
-                )
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error")
+    # --- Actions ---
+    def _get_selected_id(self, table_id="#containers"):
+        table = self.query_one(table_id, DataTable)
+        if table.cursor_row is not None and table.rows:
+            return list(table.rows.keys())[table.cursor_row].value
+        return None
 
-    def action_refresh_images(self) -> None:
-        """Action for 'i' key binding: refresh images table."""
-        self.notify("🔄 Refreshing image list...")
-        self.update_images_table()
+    def action_stop_container(self):
+        if cid := self._get_selected_id():
+            podman_client.containers.get(cid).stop()
+            self.notify("🛑 Container parado")
+            self.update_containers_table()
 
-    def action_refresh_volumes(self) -> None:
-        """Action for 'v' key binding: refresh volumes table."""
-        self.notify("🔄 Refreshing volume list...")
-        self.update_volumes_table()
+    def action_start_container(self):
+        if cid := self._get_selected_id():
+            podman_client.containers.get(cid).start()
+            self.notify("▶️ Container iniciado")
+            self.update_containers_table()
 
-    def action_refresh_networks(self) -> None:
-        """Action for 'n' key binding: refresh networks table."""
-        self.notify("🔄 Refreshing network list...")
-        self.update_networks_table()
+    def action_show_logs(self):
+        if cid := self._get_selected_id():
+            c = podman_client.containers.get(cid)
+            logs = c.logs(tail=100).decode('utf-8', errors='ignore')
+            self.push_screen(LogsScreen(logs))
 
-    def action_create_network(self) -> None:
-        """Action to open network creation modal."""
+    def action_refresh_all(self):
+        self.update_all_data()
+        self.notify("🔄 Dados atualizados")
+
+    def action_create_network(self):
         self.push_screen(CreateNetworkScreen())
 
-    def update_data(self) -> None:
-        """Atualiza os dados do Docker."""
-        self.update_containers_table()
-        self.update_images_table()
-        self.update_volumes_table()
-        self.update_networks_table()
-
 if __name__ == "__main__":
-    app = DockerTUI()
-    app.run()
+    PodmanTUI().run()
