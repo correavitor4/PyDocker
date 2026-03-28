@@ -4,9 +4,5 @@
 python -m venv .venv
 source .venv/bin/activate
 
-# Instalar as dependências
-python -m pip install --upgrade pip
-python -m pip install docker textual
-
 # Executar o programa
 python /home/vitor/Projetos/pydocker/PyDocker/src/main.py
