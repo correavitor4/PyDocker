@@ -384,6 +384,10 @@ class DockerTUI(App):
                 self.notify(f"Error removing container: {e}", severity="error")
 
     def action_show_logs(self) -> None:
+        # PROTEÇÃO: Se já estamos na tela de logs, ignora o comando
+        if isinstance(self.screen, LogsScreen):
+            return
+
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
