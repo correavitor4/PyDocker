@@ -9,4 +9,4 @@ python -m pip install --upgrade pip
 python -m pip install docker textual
 
 # Executar o programa
-python /home/vitor/Projetos/pydocker/PyDocker/src/main.py
+python ./src/main.py
