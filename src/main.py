@@ -9,6 +9,24 @@ from textual.screen import Screen, ModalScreen
 from textual.containers import Vertical, Horizontal
 import time
 
+# --- Helper para formatar bytes com segurança ---
+def format_size(size_bytes):
+    """Converte bytes para KB, MB, GB de forma legível e segura."""
+    try:
+        size_bytes = float(size_bytes)
+    except (TypeError, ValueError):
+        return "N/A"
+        
+    if size_bytes <= 0:
+        return "0 B"
+    
+    sizes = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(sizes) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    return f"{size_bytes:.2f} {sizes[i]}"
+
 # --- Docker initial connection ---
 try:
     docker_client = docker.from_env()
@@ -78,36 +96,28 @@ class LogsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        # auto_scroll=True garante que ele fique preso no final como um tail -f real
         yield Log(id="logs", highlight=True, auto_scroll=True)
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one(Header).title = f"Logs: {self.container.name}"
-        # Faz a primeira leitura de imediato
         self.update_logs()
-        # Inicia o Polling: verifica novos logs a cada 2 segundos
         self.log_timer = self.set_interval(2.0, self.update_logs)
 
     def update_logs(self) -> None:
         try:
-            # Pede sempre o tail=100
             current_logs = self.container.logs(tail=100, timestamps=True).decode('utf-8', errors='ignore')
-            
-            # Só re-desenha a tela se o log mudou desde a última checagem
             if current_logs != self.last_logs:
                 log_widget = self.query_one("#logs", Log)
                 log_widget.clear()
                 log_widget.write(current_logs)
                 self.last_logs = current_logs
         except Exception:
-            # Container pode ter sido apagado enquanto a tela estava aberta
             pass
 
     def action_back(self) -> None:
-        """Voltar para a interface principal."""
         if self.log_timer:
-            self.log_timer.stop() # Para o relógio de checagem
+            self.log_timer.stop()
         self.app.pop_screen()
 
 
@@ -117,7 +127,6 @@ class DockerTUI(App):
     TITLE = "🐳 PyDocker"
     SUB_TITLE = "A terminal Docker dashboard - Built by Vitor Corrêa"
 
-    # --- Atalhos de Teclado (Key Bindings) ---
     BINDINGS = [
         Binding(key="r", action="refresh_tables", description="🔄 Refresh"),
         Binding(key="s", action="stop_container", description="🛑 Stop"),
@@ -132,7 +141,6 @@ class DockerTUI(App):
     ]
 
     def compose(self) -> ComposeResult:
-        """Create and arrange UI widgets."""
         yield Header()
         with TabbedContent(id="tabs"):
             with TabPane("Containers", id="containers_tab"):
@@ -146,43 +154,34 @@ class DockerTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Called when the app is mounted. Configure tables and load data."""
         self.setup_tables()
         
-        # Carrega todas as tabelas imediatamente na inicialização
         self.update_containers_table()
         self.update_images_table()
         self.update_volumes_table()
         self.update_networks_table()
         
-        # Inicia a atualização automática das tabelas a cada 2 segundos.
         self.set_interval(2.0, self.update_data)
 
     def setup_tables(self) -> None:
-        # Containers
         containers_table = self.query_one("#containers", DataTable)
         containers_table.add_columns("ID", "Name", "Image", "Status", "Ports", "Created", "Size")
         containers_table.cursor_type = "row"
 
-        # Images
         images_table = self.query_one("#images", DataTable)
         images_table.add_columns("ID", "Repository", "Tag", "Size", "Created")
         images_table.cursor_type = "row"
 
-        # Volumes
         volumes_table = self.query_one("#volumes", DataTable)
-        volumes_table.add_columns("Name", "Driver", "Mountpoint", "Created")
+        volumes_table.add_columns("Name", "Driver", "Mountpoint", "Size", "Created")
         volumes_table.cursor_type = "row"
 
-        # Networks
         networks_table = self.query_one("#networks", DataTable)
         networks_table.add_columns("Name", "Driver", "Scope", "Subnet")
         networks_table.cursor_type = "row"
 
     def update_data(self) -> None:
-        """Verifica a aba ativa e atualiza a tabela correspondente de forma segura."""
         try:
-            # Proteção: se estamos na tela de logs, o #tabs não estará ativo
             tabs = self.query_one("#tabs", TabbedContent)
             active_tab = tabs.active
         except Exception:
@@ -205,7 +204,20 @@ class DockerTUI(App):
             if table.cursor_row is not None and 0 <= table.cursor_row < len(table.rows):
                 selected_key = list(table.rows.keys())[table.cursor_row]
 
+            # Removido o size=True daqui
             containers = docker_client.containers.list(all=True)
+            
+            # Busca os tamanhos usando df()
+            size_map = {}
+            try:
+                df_data = docker_client.df()
+                container_usage = df_data.get('Containers') or []
+                for c in container_usage:
+                    c_id = c.get('Id')
+                    if c_id:
+                        size_map[c_id] = c.get('SizeRw', -1)
+            except Exception:
+                pass
             
             table.clear()
             for container in containers:
@@ -235,8 +247,10 @@ class DockerTUI(App):
                 ports_str = ', '.join(ports) if ports else "N/A"
                 
                 created = container.attrs.get('Created', 'N/A')[:19].replace("T", " ")
-                size_bytes = container.attrs.get('SizeRootFs') or 0
-                size = f"{size_bytes // (1024**2)}MB"
+                
+                # Mapeia o tamanho com base no ID longo do container
+                size_bytes = size_map.get(container.id, -1)
+                size_str = format_size(size_bytes) if size_bytes >= 0 else "N/A"
                 
                 table.add_row(
                     container.short_id,
@@ -245,7 +259,7 @@ class DockerTUI(App):
                     status_styled,
                     ports_str,
                     created,
-                    size,
+                    size_str,
                     key=container.id,
                 )
             
@@ -265,8 +279,8 @@ class DockerTUI(App):
                 repo_tag = image.tags[0] if image.tags else "<none>:<none>"
                 repo, tag = repo_tag.split(':', 1) if ':' in repo_tag else (repo_tag, '<none>')
                 
-                size_bytes = image.attrs.get('Size') or 0
-                size = f"{size_bytes // (1024**2)}MB"
+                size_bytes = image.attrs.get('Size')
+                size_str = format_size(size_bytes)
                 
                 created = image.attrs.get('Created', 'N/A')[:19].replace("T", " ")
                 
@@ -274,7 +288,7 @@ class DockerTUI(App):
                     image.short_id,
                     repo,
                     tag,
-                    size,
+                    size_str,
                     created,
                     key=image.id,
                 )
@@ -286,17 +300,33 @@ class DockerTUI(App):
             table = self.query_one("#volumes", DataTable)
             volumes = docker_client.volumes.list()
             
+            size_map = {}
+            try:
+                df_data = docker_client.df()
+                vol_usage = df_data.get('Volumes') or []
+                for v in vol_usage:
+                    name = v.get('Name')
+                    usage = v.get('UsageData')
+                    if name and usage:
+                        size_map[name] = usage.get('Size', -1)
+            except Exception:
+                pass
+            
             table.clear()
             for volume in volumes:
                 mountpoint = volume.attrs.get('Mountpoint', 'N/A')
                 created = volume.attrs.get('CreatedAt', 'N/A')
                 if created and created != 'N/A':
                     created = created[:19].replace("T", " ")
+                
+                size_bytes = size_map.get(volume.name, -1)
+                size_str = format_size(size_bytes) if size_bytes >= 0 else "N/A"
                     
                 table.add_row(
                     volume.name,
                     volume.attrs.get("Driver", "N/A"),
                     mountpoint,
+                    size_str,
                     created,
                     key=volume.id,
                 )
@@ -384,7 +414,6 @@ class DockerTUI(App):
                 self.notify(f"Error removing container: {e}", severity="error")
 
     def action_show_logs(self) -> None:
-        # PROTEÇÃO: Se já estamos na tela de logs, ignora o comando
         if isinstance(self.screen, LogsScreen):
             return
 
