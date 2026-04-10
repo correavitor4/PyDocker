@@ -4,9 +4,8 @@ from docker.errors import APIError, DockerException
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane, Input, Button, Label
 from textual.screen import Screen, ModalScreen
-from textual.widgets import Input, Button, Label
 from textual.containers import Vertical, Horizontal
 import time
 
@@ -64,27 +63,51 @@ class CreateNetworkScreen(ModalScreen):
 
 
 class LogsScreen(Screen):
-    """Screen for viewing container logs."""
+    """Screen for viewing container logs in real-time (--tail -f)."""
 
     BINDINGS = [
         Binding(key="b", action="back", description="⬅️ Voltar"),
         Binding(key="q", action="quit", description="Quit"),
     ]
 
-    def __init__(self, logs: str):
+    def __init__(self, container):
         super().__init__()
-        self.logs_content = logs
+        self.container = container
+        self.last_logs = ""
+        self.log_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Log(id="logs", highlight=True)
+        # auto_scroll=True garante que ele fique preso no final como um tail -f real
+        yield Log(id="logs", highlight=True, auto_scroll=True)
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#logs", Log).write(self.logs_content)
+        self.query_one(Header).title = f"Logs: {self.container.name}"
+        # Faz a primeira leitura de imediato
+        self.update_logs()
+        # Inicia o Polling: verifica novos logs a cada 2 segundos
+        self.log_timer = self.set_interval(2.0, self.update_logs)
+
+    def update_logs(self) -> None:
+        try:
+            # Pede sempre o tail=100
+            current_logs = self.container.logs(tail=100, timestamps=True).decode('utf-8', errors='ignore')
+            
+            # Só re-desenha a tela se o log mudou desde a última checagem
+            if current_logs != self.last_logs:
+                log_widget = self.query_one("#logs", Log)
+                log_widget.clear()
+                log_widget.write(current_logs)
+                self.last_logs = current_logs
+        except Exception:
+            # Container pode ter sido apagado enquanto a tela estava aberta
+            pass
 
     def action_back(self) -> None:
         """Voltar para a interface principal."""
+        if self.log_timer:
+            self.log_timer.stop() # Para o relógio de checagem
         self.app.pop_screen()
 
 
@@ -125,10 +148,14 @@ class DockerTUI(App):
     def on_mount(self) -> None:
         """Called when the app is mounted. Configure tables and load data."""
         self.setup_tables()
-        self.update_data()
         
-        # Inicia a atualização automática a cada 2 segundos.
-        # Intervalos maiores previnem "flickering" na interface.
+        # Carrega todas as tabelas imediatamente na inicialização
+        self.update_containers_table()
+        self.update_images_table()
+        self.update_volumes_table()
+        self.update_networks_table()
+        
+        # Inicia a atualização automática das tabelas a cada 2 segundos.
         self.set_interval(2.0, self.update_data)
 
     def setup_tables(self) -> None:
@@ -153,23 +180,24 @@ class DockerTUI(App):
         networks_table.cursor_type = "row"
 
     def update_data(self) -> None:
-        """Verifica a aba ativa e atualiza a tabela correspondente."""
+        """Verifica a aba ativa e atualiza a tabela correspondente de forma segura."""
         try:
-            active_tab = self.query_one("#tabs", TabbedContent).active
-            
-            if active_tab == "containers_tab":
-                self.update_containers_table()
-            elif active_tab == "images_tab":
-                self.update_images_table()
-            elif active_tab == "volumes_tab":
-                self.update_volumes_table()
-            elif active_tab == "networks_tab":
-                self.update_networks_table()
+            # Proteção: se estamos na tela de logs, o #tabs não estará ativo
+            tabs = self.query_one("#tabs", TabbedContent)
+            active_tab = tabs.active
         except Exception:
-            pass
+            return
+            
+        if active_tab == "containers_tab":
+            self.update_containers_table()
+        elif active_tab == "images_tab":
+            self.update_images_table()
+        elif active_tab == "volumes_tab":
+            self.update_volumes_table()
+        elif active_tab == "networks_tab":
+            self.update_networks_table()
 
     def update_containers_table(self) -> None:
-        """Fetch Docker container data and refresh the containers table."""
         try:
             table = self.query_one("#containers", DataTable)
             
@@ -179,7 +207,6 @@ class DockerTUI(App):
 
             containers = docker_client.containers.list(all=True)
             
-            # Limpa e repopula sem suspend_update
             table.clear()
             for container in containers:
                 status = container.status
@@ -190,26 +217,26 @@ class DockerTUI(App):
                 else:
                     status_styled = f"[b yellow]{status}[/]"
 
-                image_tag = container.image.tags[0] if container.image.tags and container.image.tags[0] is not None else "N/A"
+                image_tag = "N/A"
+                if container.image and container.image.tags:
+                    image_tag = container.image.tags[0]
+                elif container.image:
+                    image_tag = container.image.short_id
                 
                 ports = []
                 if container.ports:
-                    for port_list in container.ports.values():
+                    for port_key, port_list in container.ports.items():
                         if port_list:
                             for p in port_list:
-                                private = p.get('PrivatePort') or p.get('Port') or 'N/A'
-                                public = p.get('PublicPort') or p.get('HostPort') or 'N/A'
-                                protocol = p.get('Type') or p.get('Protocol') or 'tcp'
-                                if private != 'N/A' and public != 'N/A':
-                                    ports.append(f"{private}->{public}/{protocol}")
-                                elif private != 'N/A':
-                                    ports.append(f"{private}/{protocol}")
-                                elif public != 'N/A':
-                                    ports.append(f"{public}/{protocol}")
+                                host_port = p.get('HostPort', 'N/A')
+                                ports.append(f"{host_port}->{port_key}")
+                        else:
+                            ports.append(port_key)
                 ports_str = ', '.join(ports) if ports else "N/A"
                 
                 created = container.attrs.get('Created', 'N/A')[:19].replace("T", " ")
-                size = f"{container.attrs.get('SizeRootFs', 0) // (1024**2)}MB"
+                size_bytes = container.attrs.get('SizeRootFs') or 0
+                size = f"{size_bytes // (1024**2)}MB"
                 
                 table.add_row(
                     container.short_id,
@@ -225,11 +252,10 @@ class DockerTUI(App):
             if selected_key and selected_key in table.rows:
                 table.move_cursor(row=table.get_row_index(selected_key))
 
-        except APIError:
-            pass
+        except Exception as e:
+            self.notify(f"Erro ao carregar contêineres: {e}", severity="error")
 
     def update_images_table(self) -> None:
-        """Fetch Docker image data and refresh images table."""
         try:
             table = self.query_one("#images", DataTable)
             images = docker_client.images.list(all=True)
@@ -238,7 +264,10 @@ class DockerTUI(App):
             for image in images:
                 repo_tag = image.tags[0] if image.tags else "<none>:<none>"
                 repo, tag = repo_tag.split(':', 1) if ':' in repo_tag else (repo_tag, '<none>')
-                size = f"{image.attrs.get('Size', 0) // (1024**2)}MB"
+                
+                size_bytes = image.attrs.get('Size') or 0
+                size = f"{size_bytes // (1024**2)}MB"
+                
                 created = image.attrs.get('Created', 'N/A')[:19].replace("T", " ")
                 
                 table.add_row(
@@ -249,11 +278,10 @@ class DockerTUI(App):
                     created,
                     key=image.id,
                 )
-        except APIError:
-            pass
+        except Exception as e:
+            self.notify(f"Erro ao carregar imagens: {e}", severity="error")
 
     def update_volumes_table(self) -> None:
-        """Fetch Docker volume data and refresh volumes table."""
         try:
             table = self.query_one("#volumes", DataTable)
             volumes = docker_client.volumes.list()
@@ -262,7 +290,7 @@ class DockerTUI(App):
             for volume in volumes:
                 mountpoint = volume.attrs.get('Mountpoint', 'N/A')
                 created = volume.attrs.get('CreatedAt', 'N/A')
-                if created != 'N/A':
+                if created and created != 'N/A':
                     created = created[:19].replace("T", " ")
                     
                 table.add_row(
@@ -272,11 +300,10 @@ class DockerTUI(App):
                     created,
                     key=volume.id,
                 )
-        except APIError:
-            pass
+        except Exception as e:
+            self.notify(f"Erro ao carregar volumes: {e}", severity="error")
 
     def update_networks_table(self) -> None:
-        """Fetch Docker network data and refresh networks table."""
         try:
             table = self.query_one("#networks", DataTable)
             networks = docker_client.networks.list()
@@ -285,9 +312,10 @@ class DockerTUI(App):
             for network in networks:
                 scope = network.attrs.get('Scope', 'N/A')
                 subnet = 'N/A'
-                if network.attrs.get('IPAM') and network.attrs['IPAM'].get('Config'):
-                    config = network.attrs['IPAM']['Config'][0]
-                    subnet = config.get('Subnet', 'N/A')
+                
+                ipam = network.attrs.get('IPAM')
+                if ipam and ipam.get('Config') and len(ipam['Config']) > 0:
+                    subnet = ipam['Config'][0].get('Subnet', 'N/A')
                     
                 table.add_row(
                     network.name,
@@ -296,8 +324,8 @@ class DockerTUI(App):
                     subnet,
                     key=network.id,
                 )
-        except APIError:
-            pass
+        except Exception as e:
+            self.notify(f"Erro ao carregar redes: {e}", severity="error")
 
     # --- Ações dos Atalhos ---
 
@@ -359,23 +387,22 @@ class DockerTUI(App):
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
-                logs = container.logs(tail=100, stream=False, timestamps=True).decode('utf-8', errors='ignore')
-                logs_screen = LogsScreen(logs)
+                logs_screen = LogsScreen(container)
                 self.push_screen(logs_screen)
             except APIError as e:
                 self.notify(f"Erro ao buscar logs: {e}", severity="error")
 
     def action_refresh_images(self) -> None:
         self.notify("🔄 Refreshing images...")
-        self.update_data()
+        self.update_images_table()
 
     def action_refresh_volumes(self) -> None:
         self.notify("🔄 Refreshing volumes...")
-        self.update_data()
+        self.update_volumes_table()
 
     def action_refresh_networks(self) -> None:
         self.notify("🔄 Refreshing networks...")
-        self.update_data()
+        self.update_networks_table()
 
     def action_create_network(self) -> None:
         self.push_screen(CreateNetworkScreen())
