@@ -4,19 +4,15 @@ from docker.errors import APIError, DockerException
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
 from textual.widgets import DataTable, Footer, Header, Log, TabbedContent, TabPane
-from textual.widgets.data_table import Column
 from textual.screen import Screen, ModalScreen
 from textual.widgets import Input, Button, Label
 from textual.containers import Vertical, Horizontal
 import time
 
 # --- Docker initial connection ---
-# Attempts to connect to the Docker daemon; exits on failure.
 try:
     docker_client = docker.from_env()
-    # Quick ping to ensure the daemon is responsive.
     docker_client.ping()
 except DockerException:
     print("❌ Error: Unable to connect to Docker.")
@@ -59,8 +55,7 @@ class CreateNetworkScreen(ModalScreen):
                 try:
                     docker_client.networks.create(network_name, driver="bridge")
                     self.app.notify(f"✅ Network '{network_name}' created successfully!", severity="information")
-                    self.app.query_one("#networks", DataTable).clear()
-                    self.app.update_networks_table()
+                    self.app.update_data()
                 except APIError as e:
                     self.app.notify(f"Error creating network: {e}", severity="error")
             else:
@@ -97,7 +92,7 @@ class DockerTUI(App):
     """A terminal UI for managing Docker resources."""
 
     TITLE = "🐳 PyDocker"
-    SUB_TITLE = "A terminal Docker dashboard - Built by Vitor Corrêa (https://github.com/correavitor4)"
+    SUB_TITLE = "A terminal Docker dashboard - Built by Vitor Corrêa"
 
     # --- Atalhos de Teclado (Key Bindings) ---
     BINDINGS = [
@@ -116,7 +111,7 @@ class DockerTUI(App):
     def compose(self) -> ComposeResult:
         """Create and arrange UI widgets."""
         yield Header()
-        with TabbedContent():
+        with TabbedContent(id="tabs"):
             with TabPane("Containers", id="containers_tab"):
                 yield DataTable(id="containers")
             with TabPane("Images", id="images_tab"):
@@ -129,75 +124,65 @@ class DockerTUI(App):
 
     def on_mount(self) -> None:
         """Called when the app is mounted. Configure tables and load data."""
-        # Setup containers table columns
+        self.setup_tables()
+        self.update_data()
+        
+        # Inicia a atualização automática a cada 2 segundos.
+        # Intervalos maiores previnem "flickering" na interface.
+        self.set_interval(2.0, self.update_data)
+
+    def setup_tables(self) -> None:
+        # Containers
         containers_table = self.query_one("#containers", DataTable)
-        containers_table.add_column("ID")
-        containers_table.add_column("Name")
-        containers_table.add_column("Image")
-        containers_table.add_column("Status")
-        containers_table.add_column("Ports")
-        containers_table.add_column("Created")
-        containers_table.add_column("Size")
+        containers_table.add_columns("ID", "Name", "Image", "Status", "Ports", "Created", "Size")
         containers_table.cursor_type = "row"
 
-        # Load containers data
-        self.update_containers_table()
-
-        # Configure columns for images table
+        # Images
         images_table = self.query_one("#images", DataTable)
-        images_table.add_column("ID")
-        images_table.add_column("Repository")
-        images_table.add_column("Tag")
-        images_table.add_column("Size")
-        images_table.add_column("Created")
+        images_table.add_columns("ID", "Repository", "Tag", "Size", "Created")
         images_table.cursor_type = "row"
 
-        # Load images data
-        self.update_images_table()
-
-        # Configure columns for volumes table
+        # Volumes
         volumes_table = self.query_one("#volumes", DataTable)
-        volumes_table.add_column("Name")
-        volumes_table.add_column("Driver")
-        volumes_table.add_column("Mountpoint")
-        volumes_table.add_column("Created")
+        volumes_table.add_columns("Name", "Driver", "Mountpoint", "Created")
         volumes_table.cursor_type = "row"
 
-        # Load volumes data
-        self.update_volumes_table()
-
-        # Configure columns for networks table
+        # Networks
         networks_table = self.query_one("#networks", DataTable)
-        networks_table.add_column("Name")
-        networks_table.add_column("Driver")
-        networks_table.add_column("Scope")
-        networks_table.add_column("Subnet")
+        networks_table.add_columns("Name", "Driver", "Scope", "Subnet")
         networks_table.cursor_type = "row"
 
-        # Load networks data
-        self.update_networks_table()
-
-        # Inicia a atualização dos dados a cada 1s
-        self.update_data_timer = self.set_interval(1000, self.update_data)
+    def update_data(self) -> None:
+        """Verifica a aba ativa e atualiza a tabela correspondente."""
+        try:
+            active_tab = self.query_one("#tabs", TabbedContent).active
+            
+            if active_tab == "containers_tab":
+                self.update_containers_table()
+            elif active_tab == "images_tab":
+                self.update_images_table()
+            elif active_tab == "volumes_tab":
+                self.update_volumes_table()
+            elif active_tab == "networks_tab":
+                self.update_networks_table()
+        except Exception:
+            pass
 
     def update_containers_table(self) -> None:
         """Fetch Docker container data and refresh the containers table."""
-        table = self.query_one("#containers", DataTable)
-        
-        # Keep the selected row key so we can restore focus after table refresh
-        selected_row = table.cursor_row
-        if selected_row is not None and 0 <= selected_row < len(table.rows):
-            # table.rows is a dict, so we fetch the RowKey by index
-            selected_key = list(table.rows.keys())[selected_row]
-        else:
-            selected_key = None
-
-        table.clear()
-
         try:
-            for container in docker_client.containers.list(all=True):
+            table = self.query_one("#containers", DataTable)
+            
+            selected_key = None
+            if table.cursor_row is not None and 0 <= table.cursor_row < len(table.rows):
+                selected_key = list(table.rows.keys())[table.cursor_row]
+
+            containers = docker_client.containers.list(all=True)
+            
+            # Limpa e repopula sem suspend_update
+            table.clear()
+            for container in containers:
                 status = container.status
-                # Adiciona cor ao status para melhor visualização
                 if status == "running":
                     status_styled = f"[b green]{status}[/]"
                 elif status.startswith("exited"):
@@ -223,7 +208,7 @@ class DockerTUI(App):
                                     ports.append(f"{public}/{protocol}")
                 ports_str = ', '.join(ports) if ports else "N/A"
                 
-                created = container.attrs.get('Created', 'N/A')[:19]
+                created = container.attrs.get('Created', 'N/A')[:19].replace("T", " ")
                 size = f"{container.attrs.get('SizeRootFs', 0) // (1024**2)}MB"
                 
                 table.add_row(
@@ -234,38 +219,101 @@ class DockerTUI(App):
                     ports_str,
                     created,
                     size,
-                    key=container.id, # Chave única para identificar a linha
+                    key=container.id,
                 )
             
-            # Restaura a posição do cursor se a linha ainda existir
             if selected_key and selected_key in table.rows:
                 table.move_cursor(row=table.get_row_index(selected_key))
 
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error", timeout=10)
-        
-        self.sub_title = "A terminal Docker dashboard - Built by Vitor Corrêa (https://github.com/correavitor4)"
+        except APIError:
+            pass
+
+    def update_images_table(self) -> None:
+        """Fetch Docker image data and refresh images table."""
+        try:
+            table = self.query_one("#images", DataTable)
+            images = docker_client.images.list(all=True)
+            
+            table.clear()
+            for image in images:
+                repo_tag = image.tags[0] if image.tags else "<none>:<none>"
+                repo, tag = repo_tag.split(':', 1) if ':' in repo_tag else (repo_tag, '<none>')
+                size = f"{image.attrs.get('Size', 0) // (1024**2)}MB"
+                created = image.attrs.get('Created', 'N/A')[:19].replace("T", " ")
+                
+                table.add_row(
+                    image.short_id,
+                    repo,
+                    tag,
+                    size,
+                    created,
+                    key=image.id,
+                )
+        except APIError:
+            pass
+
+    def update_volumes_table(self) -> None:
+        """Fetch Docker volume data and refresh volumes table."""
+        try:
+            table = self.query_one("#volumes", DataTable)
+            volumes = docker_client.volumes.list()
+            
+            table.clear()
+            for volume in volumes:
+                mountpoint = volume.attrs.get('Mountpoint', 'N/A')
+                created = volume.attrs.get('CreatedAt', 'N/A')
+                if created != 'N/A':
+                    created = created[:19].replace("T", " ")
+                    
+                table.add_row(
+                    volume.name,
+                    volume.attrs.get("Driver", "N/A"),
+                    mountpoint,
+                    created,
+                    key=volume.id,
+                )
+        except APIError:
+            pass
+
+    def update_networks_table(self) -> None:
+        """Fetch Docker network data and refresh networks table."""
+        try:
+            table = self.query_one("#networks", DataTable)
+            networks = docker_client.networks.list()
+            
+            table.clear()
+            for network in networks:
+                scope = network.attrs.get('Scope', 'N/A')
+                subnet = 'N/A'
+                if network.attrs.get('IPAM') and network.attrs['IPAM'].get('Config'):
+                    config = network.attrs['IPAM']['Config'][0]
+                    subnet = config.get('Subnet', 'N/A')
+                    
+                table.add_row(
+                    network.name,
+                    network.attrs.get("Driver", "N/A"),
+                    scope,
+                    subnet,
+                    key=network.id,
+                )
+        except APIError:
+            pass
 
     # --- Ações dos Atalhos ---
 
     def action_refresh_tables(self) -> None:
-        """Action for 'r' key binding: refresh all tables."""
-        self.notify("🔄 Refreshing container list...")
-        self.update_containers_table()
+        self.notify("🔄 Refreshing...")
+        self.update_data()
 
     def _get_selected_container_id(self) -> str | None:
-        """Helper to get the selected container ID from the table."""
         table = self.query_one("#containers", DataTable)
         if not table.row_count or not (0 <= table.cursor_row < len(table.rows)):
             self.notify("No containers available.", severity="warning")
             return None
-        
-        # Get the current row's RowKey and return its value (container ID)
         row_key = list(table.rows.keys())[table.cursor_row]
         return row_key.value
 
     def action_stop_container(self) -> None:
-        """Action to stop the selected container."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
@@ -275,12 +323,11 @@ class DockerTUI(App):
                     self.notify(f"✅ Container {container.name} stopped.", severity="information")
                 else:
                     self.notify(f"⚠️ Container {container.name} is already stopped.", severity="warning")
-                self.update_containers_table()
+                self.update_data()
             except APIError as e:
                 self.notify(f"Error stopping container: {e}", severity="error")
 
     def action_start_container(self) -> None:
-        """Action to start the selected container."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
@@ -290,12 +337,11 @@ class DockerTUI(App):
                     self.notify(f"✅ Container {container.name} started.", severity="information")
                 else:
                     self.notify(f"⚠️ Container {container.name} is already running.", severity="warning")
-                self.update_containers_table()
+                self.update_data()
             except APIError as e:
                 self.notify(f"Error starting container: {e}", severity="error")
 
     def action_remove_container(self) -> None:
-        """Action to remove the selected container."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
@@ -303,14 +349,13 @@ class DockerTUI(App):
                     self.notify(f"Removing container {container.name}...")
                     container.remove()
                     self.notify(f"✅ Container {container.name} removed.", severity="information")
-                    self.update_containers_table()
+                    self.update_data()
                 else:
                     self.notify("🛑 Stop the container before removing.", severity="error")
             except APIError as e:
                 self.notify(f"Error removing container: {e}", severity="error")
 
     def action_show_logs(self) -> None:
-        """Ação para mostrar os logs do contêiner selecionado."""
         if container_id := self._get_selected_container_id():
             try:
                 container = docker_client.containers.get(container_id)
@@ -319,97 +364,22 @@ class DockerTUI(App):
                 self.push_screen(logs_screen)
             except APIError as e:
                 self.notify(f"Erro ao buscar logs: {e}", severity="error")
-        else:
-            self.notify("Selecione um contêiner para ver os logs.", severity="warning")
-
-    def update_images_table(self) -> None:
-        """Fetch Docker image data and refresh images table."""
-        table = self.query_one("#images", DataTable)
-        table.clear()
-
-        try:
-            for image in docker_client.images.list(all=True):
-                repo_tag = image.tags[0] if image.tags else "<none>:<none>"
-                repo, tag = repo_tag.split(':', 1) if ':' in repo_tag else (repo_tag, '<none>')
-                size = f"{image.attrs['Size'] // (1024**2)}MB"
-                created = image.attrs['Created'][:19]
-                table.add_row(
-                    image.short_id,
-                    repo,
-                    tag,
-                    size,
-                    created,
-                    key=image.id,  # Chave única para identificar a linha
-                )
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error")
-
-    def update_volumes_table(self) -> None:
-        """Fetch Docker volume data and refresh volumes table."""
-        table = self.query_one("#volumes", DataTable)
-        table.clear()
-
-        try:
-            for volume in docker_client.volumes.list():
-                mountpoint = volume.attrs.get('Mountpoint', 'N/A')
-                created = volume.attrs.get('CreatedAt', 'N/A')[:19]
-                table.add_row(
-                    volume.name,
-                    volume.attrs.get("Driver", "N/A"),
-                    mountpoint,
-                    created,
-                    key=volume.id,  # Chave única para identificar a linha
-                )
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error")
-
-    def update_networks_table(self) -> None:
-        """Fetch Docker network data and refresh networks table."""
-        table = self.query_one("#networks", DataTable)
-        table.clear()
-
-        try:
-            for network in docker_client.networks.list():
-                scope = network.attrs.get('Scope', 'N/A')
-                subnet = 'N/A'
-                if network.attrs.get('IPAM') and network.attrs['IPAM'].get('Config'):
-                    config = network.attrs['IPAM']['Config'][0]
-                    subnet = config.get('Subnet', 'N/A')
-                table.add_row(
-                    network.name,
-                    network.attrs.get("Driver", "N/A"),
-                    scope,
-                    subnet,
-                    key=network.id,  # Chave única para identificar a linha
-                )
-        except APIError as e:
-            self.notify(f"Erro de API do Docker: {e}", severity="error")
 
     def action_refresh_images(self) -> None:
-        """Action for 'i' key binding: refresh images table."""
-        self.notify("🔄 Refreshing image list...")
-        self.update_images_table()
+        self.notify("🔄 Refreshing images...")
+        self.update_data()
 
     def action_refresh_volumes(self) -> None:
-        """Action for 'v' key binding: refresh volumes table."""
-        self.notify("🔄 Refreshing volume list...")
-        self.update_volumes_table()
+        self.notify("🔄 Refreshing volumes...")
+        self.update_data()
 
     def action_refresh_networks(self) -> None:
-        """Action for 'n' key binding: refresh networks table."""
-        self.notify("🔄 Refreshing network list...")
-        self.update_networks_table()
+        self.notify("🔄 Refreshing networks...")
+        self.update_data()
 
     def action_create_network(self) -> None:
-        """Action to open network creation modal."""
         self.push_screen(CreateNetworkScreen())
 
-    def update_data(self) -> None:
-        """Atualiza os dados do Docker."""
-        self.update_containers_table()
-        self.update_images_table()
-        self.update_volumes_table()
-        self.update_networks_table()
 
 if __name__ == "__main__":
     app = DockerTUI()
